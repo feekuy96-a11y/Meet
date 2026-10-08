@@ -43,6 +43,32 @@ export function validateSummary(value) {
     }))
   };
 }
+
+export function validateAudioManifest(value, partCount) {
+  if (!Array.isArray(value) || value.length > 1000) throw new Error('รายการเสียงคลาวด์ผิดรูปแบบ');
+  const seen = new Set();
+  let count = 0;
+  return value.map((p) => {
+    if (!p || !Number.isSafeInteger(p.part) || p.part < 1 || p.part > partCount || seen.has(p.part))
+      throw new Error('ช่วงเสียงคลาวด์ผิดรูปแบบ');
+    seen.add(p.part);
+    if (
+      !['audio/webm', 'audio/mp4', 'audio/ogg', 'audio/wav', 'audio/mpeg'].includes(p.mime) ||
+      !Number.isSafeInteger(p.size) ||
+      p.size < 1 ||
+      p.size > 256 * 1024 * 1024 ||
+      !Array.isArray(p.blocks) ||
+      p.blocks.length !== Math.ceil(p.size / (1024 * 1024))
+    )
+      throw new Error('ขนาดเสียงคลาวด์ผิดรูปแบบ');
+    count += p.blocks.length;
+    if (count > 2000) throw new Error('ข้อมูลเสียงคลาวด์เกินกำหนด');
+    if (p.blocks.some((hash) => typeof hash !== 'string' || !/^[a-f0-9]{64}$/.test(hash)))
+      throw new Error('checksum เสียงคลาวด์ผิดรูปแบบ');
+    return { part: p.part, mime: p.mime, size: p.size, blocks: [...p.blocks] };
+  });
+}
+
 export function validateMeeting(value, freshId = false) {
   if (!value || typeof value !== 'object') throw new Error('ไฟล์ไม่ใช่ข้อมูลการประชุม');
   if (!Array.isArray(value.speakers) || value.speakers.length < 1 || value.speakers.length > 9)
@@ -76,7 +102,45 @@ export function validateMeeting(value, freshId = false) {
     /^[A-Za-z0-9_-]{16,100}$/.test(value.docRequest.id)
       ? { fingerprint: value.docRequest.fingerprint, id: value.docRequest.id }
       : null;
+  const cloud =
+    !freshId && value.cloud
+      ? {
+          source: text(value.cloud.source, 2000),
+          version: value.cloud.version,
+          audio: validateAudioManifest(value.cloud.audio, part),
+          docUrl:
+            typeof value.cloud.docUrl === 'string' &&
+            /^https:\/\/docs\.google\.com\/document\/d\/[A-Za-z0-9_-]+\/edit$/.test(
+              value.cloud.docUrl
+            )
+              ? value.cloud.docUrl
+              : null,
+          docStatus: ['ready', 'creating', 'error'].includes(value.cloud.docStatus)
+            ? value.cloud.docStatus
+            : null,
+          docError:
+            typeof value.cloud.docError === 'string' ? value.cloud.docError.slice(0, 500) : null
+        }
+      : null;
+  if (cloud && (!Number.isSafeInteger(cloud.version) || cloud.version < 1))
+    throw new Error('รุ่นคลาวด์ไม่ถูกต้อง');
+  const mutation =
+    !freshId &&
+    value.cloudMutation &&
+    /^[a-f0-9]{64}$/.test(value.cloudMutation.fingerprint) &&
+    /^[A-Za-z0-9_-]{1,100}$/.test(value.cloudMutation.id)
+      ? { id: value.cloudMutation.id, fingerprint: value.cloudMutation.fingerprint }
+      : null;
   return {
+    cloud,
+    cloudDirty: freshId || value.cloudDirty !== false,
+    cloudMutation: mutation,
+    cloudDeleteOperation:
+      !freshId &&
+      typeof value.cloudDeleteOperation === 'string' &&
+      /^[A-Za-z0-9_-]{1,100}$/.test(value.cloudDeleteOperation)
+        ? value.cloudDeleteOperation
+        : null,
     updatedAt:
       !freshId &&
       typeof value.updatedAt === 'string' &&

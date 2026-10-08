@@ -2,6 +2,7 @@ import { DB } from './db.js';
 import { API, validateEndpoint, MAX_AUDIO_BYTES } from './api.js';
 import { UI } from './ui.js';
 import { AudioEngine } from './audio.js';
+import { CloudSync, cloudReady } from './cloud.js';
 import { uid, newMeeting, validateMeeting, validateSummary, summaryMarkdown } from './model.js';
 
 const $ = (s) => UI.$(s),
@@ -18,12 +19,14 @@ const COLORS = [
   '#64748b'
 ];
 const TAGS = ['', 'สำคัญ', 'ภารกิจ', 'มติ', 'คำถาม'];
-let cfg = { gasUrl: '', useAudio: false, theme: '' };
+let cfg = { gasUrl: '', useAudio: false, theme: '', cloudSync: false, autoDocs: true };
 try {
   const stored = JSON.parse(localStorage.getItem('mn_cfg') || '{}');
   cfg = {
     gasUrl: typeof stored.gasUrl === 'string' ? stored.gasUrl : '',
     useAudio: stored.useAudio === true,
+    cloudSync: stored.cloudSync === true,
+    autoDocs: stored.autoDocs !== false,
     theme: ['dark', 'light'].includes(stored.theme) ? stored.theme : ''
   };
   // Remove legacy persistent passwords; require re-entry for this tab only.
@@ -53,6 +56,14 @@ let unsaved = false,
   saveSequence = 0,
   savedSequence = 0,
   editSaveTimer = null;
+let cloudTimer = null,
+  lastCloudConflicts = [];
+const cloud = new CloudSync(
+  () => ({ ...cfg, gasToken }),
+  (text) => {
+    $('#cloudStatus').textContent = text;
+  }
+);
 const engine = new AudioEngine();
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 const now = () => base + (state === 'rec' ? (performance.now() - startedAt) / 1000 : 0);
@@ -82,6 +93,7 @@ async function save() {
   if (['loading', 'error'].includes(state)) throw new Error('ฐานข้อมูลยังไม่พร้อม');
   if (!meeting.title && !meeting.segs.length && !meeting.part && !meeting.summary && !meeting.dur)
     return;
+  if (state !== 'idle' || unsaved || meeting.cloudDirty !== false) meeting.cloudDirty = true;
   meeting.updatedAt = new Date().toISOString();
   meeting.dur = now();
   meeting.recording = ['rec', 'pause', 'starting'].includes(state);
@@ -91,8 +103,11 @@ async function save() {
   savedSequence = Math.max(savedSequence, sequence);
   unsaved = savedSequence < saveSequence;
   lastSave = performance.now();
+  scheduleCloud();
 }
 function changed() {
+  meeting.cloudDirty = true;
+  unsaved = true;
   meeting.revision++;
   meeting.sumJ = null;
   meeting.summary = null;
@@ -111,6 +126,8 @@ function updateControls() {
   $('#bAI').disabled = state !== 'idle' || busy || !!recovery;
   $('#bDocs').disabled = state !== 'idle' || busy || !!recovery;
   $('#bNew').disabled = state !== 'idle' || busy || !!recovery;
+  $('#bSync').disabled = state !== 'idle' || busy || !!recovery;
+  $('#bConflicts').disabled = state !== 'idle' || busy || !!recovery;
   $('#bPause').textContent = state === 'pause' ? '▶ ทำต่อ' : '⏸ พัก';
   $('#chip').className = 'chip ' + (state === 'rec' ? 'rec' : state === 'pause' ? 'pa' : '');
   $('#chip').textContent = {
@@ -186,6 +203,10 @@ function renderSummary() {
   $('#sumBy').classList.toggle('hide', !meeting.summary);
 }
 function render() {
+  const docURL = meeting.cloud?.docUrl;
+  $('#cloudDoc').classList.toggle('hide', !docURL);
+  if (docURL) $('#cloudDoc').href = docURL;
+  else $('#cloudDoc').removeAttribute('href');
   $('#title').value = meeting.title;
   renderSpeakers();
   renderList();
@@ -488,12 +509,13 @@ async function renderAudio() {
   const entries = await DB.audioEntries(id + ':');
   if (version !== audioRenderVersion) return;
   const parts = [
-    ...new Set(
-      entries.map((e) => {
+    ...new Set([
+      ...entries.map((e) => {
         const match = /:(?:full(\d+)|chunk:(\d+):)/.exec(e.key);
         return Number(match?.[1] || match?.[2] || 0);
-      })
-    )
+      }),
+      ...(meeting.cloud?.audio || []).map((p) => p.part)
+    ])
   ]
     .filter(Boolean)
     .sort((a, b) => a - b);
@@ -508,7 +530,7 @@ async function renderAudio() {
     play.onclick = run(async () => {
       play.disabled = true;
       try {
-        const blob = await DB.getPart(id, part);
+        const blob = await audioPartFor(id, part);
         if (version !== audioRenderVersion || !blob) return;
         const player = document.createElement('audio');
         player.controls = true;
@@ -522,7 +544,7 @@ async function renderAudio() {
       }
     });
     dl.onclick = run(async () => {
-      const blob = await DB.getPart(id, part);
+      const blob = await audioPartFor(id, part);
       if (blob) download(blob, filename() + `-part-${part}.` + audioExtension(blob.type));
     });
     row.append(play, dl);
@@ -539,11 +561,16 @@ async function renderAudio() {
 async function collectAudio(target) {
   // Check total stored bytes BEFORE constructing entire recordings in memory.
   const entries = await DB.audioEntries(target.id + ':');
-  if (entries.reduce((size, e) => size + e.blob.size, 0) > MAX_AUDIO_BYTES)
+  if (
+    Math.max(
+      entries.reduce((size, e) => size + e.blob.size, 0),
+      (target.cloud?.audio || []).reduce((n, p) => n + p.size, 0)
+    ) > MAX_AUDIO_BYTES
+  )
     throw new Error('เสียงเกิน 8 MB โปรดปิดส่งเสียงในตั้งค่า ใช้ข้อความแทน และดาวน์โหลดเสียงแยก');
   const result = [];
   for (let part = 1; part <= target.part; part++) {
-    const blob = await DB.getPart(target.id, part);
+    const blob = await cloud.audioPart(target, part);
     if (blob?.size)
       result.push({ mime: blob.type.split(';')[0], data: await API.blobToBase64(blob) });
   }
@@ -588,6 +615,7 @@ async function summarize() {
     const summary = validateSummary(result.data);
     if (meeting.id !== target.id || meeting.revision !== revision)
       throw new Error('ข้อความเปลี่ยนระหว่างสรุป โปรดสรุปใหม่');
+    meeting.cloudDirty = true;
     meeting.sumJ = summary;
     meeting.summary = {
       md: summaryMarkdown(summary),
@@ -777,6 +805,7 @@ $('#bSumCopy').onclick = run(async () => {
 });
 $('#title').oninput = run(async (e) => {
   meeting.title = e.target.value.slice(0, 200);
+  meeting.cloudDirty = true;
   await save();
 });
 $('#q').oninput = renderList;
@@ -817,6 +846,7 @@ $('#spks').onclick = run(async (event) => {
   } else if (!event.target.matches('input')) {
     meeting.cur = index;
     renderSpeakers();
+    meeting.cloudDirty = true;
     await save();
   }
 });
@@ -903,15 +933,28 @@ $('#hl').onclick = run(async (event) => {
     );
     UI.toast('สำรองข้อความแล้ว ต้องดาวน์โหลดเสียงแยก', 'warn');
   } else if (event.target.matches('[data-delete]')) {
-    if (
-      !(await UI.ask(
-        'ลบการประชุม?',
-        'ลบข้อความและเสียงในเครื่องถาวร ไฟล์ใน Google Drive จะไม่ถูกลบ',
-        'ลบ',
-        'rd'
-      ))
-    )
-      return;
+    const target = await DB.getMeeting(row.dataset.id);
+    const mode = await UI.modal(
+      'ลบการประชุม?',
+      '<p>ลบเฉพาะเครื่องจะเก็บข้อมูลบน Drive ไว้ และซิงก์ครั้งหน้าจะโหลดกลับมา ลบทุกเครื่องจะซ่อนรายการจากคลาวด์ด้วย ไฟล์ Google Docs และไฟล์ข้อมูลบน Drive ไม่ถูกลบถาวร</p>',
+      [
+        { t: 'ยกเลิก', v: null },
+        { t: 'ลบเฉพาะเครื่อง', v: 'local' },
+        { t: 'ลบจากทุกเครื่อง', v: 'cloud', c: 'rd' }
+      ]
+    );
+    if (!mode) return;
+    if (mode === 'cloud') {
+      if (!cloudReady({ ...cfg, gasToken })) throw new Error('เชื่อมต่อ Drive ก่อนลบจากทุกเครื่อง');
+      busy = true;
+      updateControls();
+      try {
+        await cloud.deleteEverywhere(validateMeeting(target));
+      } finally {
+        busy = false;
+        updateControls();
+      }
+    }
     await DB.deleteMeeting(row.dataset.id);
     if (row.dataset.id === meeting.id) {
       meeting = newMeeting();
@@ -951,7 +994,7 @@ $('#theme').onclick = () => {
 $('#bSet').onclick = () =>
   UI.modal(
     'ตั้งค่าระบบ',
-    `<p>รหัสผ่านอยู่ในหน่วยความจำแท็บเท่านั้น ปิดหรือรีโหลดต้องใส่ใหม่</p><label class="f" for="cGas">Web App URL</label><input id="cGas" value="${esc(cfg.gasUrl)}" placeholder="https://script.google.com/macros/s/…/exec"><label class="f" for="cGasTok">รหัสผ่านเชื่อมต่อ</label><input id="cGasTok" type="password" autocomplete="off" value="${esc(gasToken)}"><label class="sw"><input id="cUse" type="checkbox" ${cfg.useAudio ? 'checked' : ''}><span></span>ส่งเสียงให้ Gemini และ Drive (ถ้าเกิน 8 MB ให้ใช้ข้อความ)</label><p>โมเดลกำหนดฝั่ง Apps Script ไม่ต้องใส่ API key ในเว็บ</p>`,
+    `<p>รหัสผ่านอยู่ในหน่วยความจำแท็บเท่านั้น ปิดหรือรีโหลดต้องใส่ใหม่</p><label class="f" for="cGas">Web App URL</label><input id="cGas" value="${esc(cfg.gasUrl)}" placeholder="https://script.google.com/macros/s/…/exec"><label class="f" for="cGasTok">รหัสผ่านเชื่อมต่อ</label><input id="cGasTok" type="password" autocomplete="off" value="${esc(gasToken)}"><label class="sw"><input id="cUse" type="checkbox" ${cfg.useAudio ? 'checked' : ''}><span></span>ส่งเสียงให้ Gemini และ Drive (ถ้าเกิน 8 MB ให้ใช้ข้อความ)</label><label class="sw"><input id="cCloud" type="checkbox" ${cfg.cloudSync ? 'checked' : ''}><span></span>ซิงก์ข้อมูลและเสียงทั้งหมดกับ Google Drive ข้ามเครื่อง</label><label class="sw"><input id="cAutoDocs" type="checkbox" ${cfg.autoDocs ? 'checked' : ''}><span></span>สร้าง/อัปเดตรายงาน Google Docs อัตโนมัติหลังซิงก์</label><p>เมื่อเปิดซิงก์และกดซิงก์ จะส่งชื่อ ผู้พูด ข้อความ สรุป และเสียงทั้งหมดไป Drive ตามสิทธิ์โฟลเดอร์ การส่งเสียงเพื่อสรุป AI เป็นอีกตัวเลือกหนึ่ง</p><p>โมเดลกำหนดฝั่ง Apps Script ไม่ต้องใส่ API key ในเว็บ</p>`,
     [
       { t: 'ปิด', v: 0 },
       {
@@ -960,11 +1003,18 @@ $('#bSet').onclick = () =>
         fn: () => {
           const value = $('#cGas').value.trim();
           if (value) validateEndpoint(value);
-          const next = { ...cfg, gasUrl: value, useAudio: $('#cUse').checked };
+          const next = {
+            ...cfg,
+            gasUrl: value,
+            useAudio: $('#cUse').checked,
+            cloudSync: $('#cCloud').checked,
+            autoDocs: $('#cAutoDocs').checked
+          };
           localStorage.setItem('mn_cfg', JSON.stringify(next));
           cfg = next;
           gasToken = $('#cGasTok').value;
           UI.toast('บันทึกการตั้งค่าแล้ว', 'ok');
+          setTimeout(() => scheduleCloud(), 0);
         }
       }
     ]
@@ -985,6 +1035,7 @@ $('#importFile').onchange = run(async (event) => {
   $('#full').classList.add('hide');
   render();
   await tab('rec');
+  scheduleCloud();
   UI.toast('นำเข้าข้อความแล้ว JSON ไม่รวมไฟล์เสียง', 'ok');
 });
 document.addEventListener(
@@ -1006,7 +1057,7 @@ document.addEventListener(
   })
 );
 window.addEventListener('beforeunload', (event) => {
-  if (state !== 'idle' || busy || recovery || unsaved) {
+  if (state !== 'idle' || busy || recovery || unsaved || cloud.running) {
     event.preventDefault();
     event.returnValue = '';
   }
@@ -1022,13 +1073,188 @@ function networkStatus() {
   $('#net').textContent = online ? '🟢 มีเครือข่าย' : '🔴 ออฟไลน์';
   $('#net').title = 'สถานะเครือข่ายไม่ได้ยืนยันว่า Gemini หรือ Apps Script ใช้งานได้';
 }
-window.addEventListener('online', networkStatus);
+window.addEventListener('online', () => {
+  networkStatus();
+  scheduleCloud();
+});
 window.addEventListener('offline', networkStatus);
 networkStatus();
 $('#net').onclick = () =>
   UI.toast(
     'ข้อมูลอยู่ในเบราว์เซอร์นี้ ถอดเสียงและ AI อาจต้องอินเทอร์เน็ต สำรอง JSON และเสียงก่อนล้างข้อมูลเว็บ'
   );
+
+function scheduleCloud() {
+  clearTimeout(cloudTimer);
+  if (
+    cloudReady({ ...cfg, gasToken }) &&
+    state === 'idle' &&
+    !busy &&
+    !recovery &&
+    navigator.onLine !== false
+  ) {
+    $('#cloudStatus').textContent = 'มีข้อมูลรอซิงก์';
+    cloudTimer = setTimeout(() => run(() => syncCloud(false))(), 3000);
+  } else if (!cloudReady({ ...cfg, gasToken }))
+    $('#cloudStatus').textContent = 'ซิงก์ยังไม่เชื่อมต่อ';
+}
+async function audioPartFor(id, part) {
+  const target = id === meeting.id ? meeting : await DB.getMeeting(id);
+  if (!target) throw new Error('ไม่พบประชุม');
+  const local = await DB.getPart(id, part);
+  if (local) return local;
+  if (!cloudReady({ ...cfg, gasToken }))
+    throw new Error('เสียงอยู่บน Drive ต้องใส่รหัสเชื่อมต่อและเปิดซิงก์ก่อนโหลด');
+  return cloud.audioPart(target, part);
+}
+async function syncCloud(manual = true) {
+  if (!available()) return;
+  if (!cloudReady({ ...cfg, gasToken }))
+    throw new Error('เปิดตั้งค่า ใส่ URL/รหัสเชื่อมต่อ และเปิดซิงก์ Drive ก่อน');
+  clearTimeout(cloudTimer);
+  clearTimeout(editSaveTimer);
+  if (unsaved) await save();
+  busy = true;
+  updateControls();
+  const currentId = meeting.id;
+  try {
+    // Saves already mark cloudDirty; do not manufacture a new edit merely by syncing.
+    clearTimeout(cloudTimer);
+    const result = await cloud.sync();
+    lastCloudConflicts = result.conflicts;
+    const current =
+      (await DB.getMeeting(currentId)) || (await DB.getAllMeetings()).find((m) => !m.recording);
+    if (current) {
+      meeting = validateMeeting(current);
+      base = meeting.dur;
+    } else {
+      meeting = newMeeting();
+      base = 0;
+    }
+    render();
+    await renderAudio();
+    await history();
+    $('#bConflicts').classList.toggle('hide', !result.conflicts.length);
+    $('#cloudStatus').textContent = result.conflicts.length
+      ? `มี ${result.conflicts.length} รายการต้องเลือกรุ่น`
+      : 'ซิงก์ข้อความและเสียงแล้ว';
+    if (result.documentWarnings?.length) {
+      $('#cloudStatus').textContent = 'ข้อมูลซิงก์แล้ว แต่ Docs ยังไม่อัปเดต';
+      UI.toast(result.documentWarnings[0].error, 'warn', 12000);
+    }
+    if (manual)
+      UI.toast(
+        result.conflicts.length
+          ? 'พบข้อมูลต่างรุ่น ไม่ได้เขียนทับ โปรดกดจัดการข้อมูลต่างรุ่น'
+          : 'ซิงก์แล้ว เครื่องอื่นกดซิงก์เพื่อโหลดข้อมูลล่าสุด',
+        result.conflicts.length ? 'warn' : 'ok'
+      );
+  } catch (error) {
+    $('#cloudStatus').textContent = 'ซิงก์ไม่สำเร็จ ข้อมูลยังอยู่ในเครื่อง';
+    throw error;
+  } finally {
+    busy = false;
+    updateControls();
+  }
+}
+async function resolveConflicts() {
+  if (!available() || !lastCloudConflicts.length) return;
+  const item = lastCloudConflicts[0],
+    local = await DB.getMeeting(item.id);
+  if (item.reason === 'recording')
+    throw new Error(
+      'ประชุมนี้ถูกขัดจังหวะ ให้เปิดจากคลังประวัติเพื่อตรวจข้อมูลที่กู้คืน แล้วซิงก์อีกครั้ง'
+    );
+  if (!local) return;
+  const action = await UI.modal(
+    'ข้อมูลต่างรุ่น: ' + (item.title || 'ไม่มีชื่อ'),
+    '<p>ไม่ได้เขียนทับข้อมูล คุณสามารถสำรอง JSON ก่อน แล้วเลือกใช้รุ่นบนคลาวด์ (ทิ้งการแก้ในเครื่องนี้) หรือสร้างสำเนาใหม่ของข้อมูลในเครื่อง รวมเสียงที่มีในเครื่อง เพื่อรักษาทั้งสองรุ่น</p>',
+    [
+      { t: 'ยกเลิก', v: null },
+      {
+        t: 'สำรอง JSON',
+        fn: () => {
+          download(
+            new Blob([JSON.stringify({ format: 'meetnote-text-v2', meeting: local }, null, 2)], {
+              type: 'application/json'
+            }),
+            'conflict-backup.json'
+          );
+          return false;
+        }
+      },
+      { t: 'ใช้รุ่นคลาวด์', v: 'remote' },
+      { t: 'เก็บในเครื่องเป็นสำเนาใหม่', v: 'copy' }
+    ]
+  );
+  if (!action) return;
+  busy = true;
+  updateControls();
+  try {
+    if (action === 'remote') {
+      if (
+        !(await UI.ask(
+          'ยืนยันใช้รุ่นคลาวด์?',
+          'การแก้ในเครื่องที่ยังไม่ซิงก์จะถูกแทนที่ รวมเสียงในเครื่อง โปรดสำรองก่อน',
+          'ใช้รุ่นคลาวด์'
+        ))
+      )
+        return;
+      const remote = await cloud.get(item.id);
+      if (remote.deleted) await DB.deleteMeeting(item.id);
+      else await DB.replaceFromCloud(remote.meeting);
+    } else {
+      const copy = validateMeeting(local);
+      copy.id = uid();
+      copy.title = (copy.title + ' (สำเนา)').slice(0, 200);
+      copy.cloud = null;
+      copy.cloudDirty = true;
+      copy.cloudMutation = null;
+      copy.cloudDeleteOperation = null;
+      copy.docRequest = null;
+      // Resolve outstanding remote-only audio before making an independent copy.
+      for (let part = 1; part <= copy.part; part++) {
+        await cloud.audioPart(local, part);
+      }
+      await DB.cloneMeetingWithAudio(local.id, copy);
+      const remote = await cloud.get(item.id);
+      if (remote.deleted) await DB.deleteMeeting(item.id);
+      else await DB.replaceFromCloud(remote.meeting);
+    }
+    if (meeting.id === item.id) {
+      const current = await DB.getMeeting(item.id);
+      meeting = current ? validateMeeting(current) : newMeeting();
+      base = meeting.dur;
+      render();
+      await renderAudio();
+    }
+    lastCloudConflicts = lastCloudConflicts.filter((c) => c.id !== item.id);
+    $('#bConflicts').classList.toggle('hide', !lastCloudConflicts.length);
+    await history();
+  } finally {
+    busy = false;
+    updateControls();
+  }
+  await syncCloud();
+}
+$('#bSync').onclick = run(() => syncCloud());
+$('#bConflicts').onclick = run(resolveConflicts);
+setInterval(() => {
+  if (
+    document.visibilityState === 'visible' &&
+    state === 'idle' &&
+    !busy &&
+    !recovery &&
+    !lastCloudConflicts.length &&
+    cloudReady({ ...cfg, gasToken }) &&
+    navigator.onLine !== false
+  )
+    run(() => syncCloud(false))();
+}, 60000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) scheduleCloud();
+});
+
 // Keep one writer per origin; a second tab must not overwrite a live meeting.
 function acquireStorageLock() {
   if (!navigator.locks)
@@ -1078,7 +1304,11 @@ updateControls();
         'warn',
         12000
       );
-    meeting.recording = false;
+    if (meeting.recording) {
+      meeting.recording = false;
+      meeting.cloudDirty = true;
+      await DB.saveMeeting(meeting);
+    }
     state = 'idle';
     render();
     await renderAudio();

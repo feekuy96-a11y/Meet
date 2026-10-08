@@ -46,7 +46,11 @@ export const API = {
       } catch {
         throw new Error('เซิร์ฟเวอร์ไม่ตอบ JSON โปรดตรวจ URL และสิทธิ์ Deploy');
       }
-      if (!result || result.ok !== true) throw new Error(result?.error || 'เซิร์ฟเวอร์ปฏิเสธคำขอ');
+      if (!result || result.ok !== true) {
+        const error = new Error(result?.error || 'เซิร์ฟเวอร์ปฏิเสธคำขอ');
+        error.code = result?.code;
+        throw error;
+      }
       return result;
     } catch (error) {
       if (error.name === 'AbortError')

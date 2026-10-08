@@ -70,7 +70,7 @@ worklet.js  4284ed5ca70100ed58a0613865c7e6e11371264ff46fc41eec95d53c6ad750db
 ### รันในเครื่องทดสอบจริง
 
 - `npm ci --ignore-scripts --no-audit --no-fund --cache /workspace/.npm-cache`: ติดตั้งจาก lockfile ได้
-- `npm test`: **17 ผ่าน, 0 ล้มเหลว, 0 ข้าม** (10 core และ 7 backend)
+- `npm test`: **26 ผ่าน, 0 ล้มเหลว, 0 ข้าม** (10 core, 7 backend และ 9 cloud)
 - Browser smoke test บน Chromium จริงผ่าน: ข้อความอยู่หลัง reload, แก้ข้อความ, theme, URL validation, token ไม่เก็บถาวร, AI UI, ข้อความ HTML จาก error ไม่กลายเป็น tag, MediaRecorder กับไมโครโฟนจำลอง, พัก/ทำต่อ, final audio เปิด metadata ได้และดาวน์โหลด, Markdown/Word/PDF print view/JSON, import, crash recovery, quota-failure recovery, offline shell, ป้องกันแท็บที่สอง และข้อมูลเก่าเสียรูปแบบยังสำรองได้
 - เส้นทางสร้าง Docs ที่เซิร์ฟเวอร์ตอบ error แล้วลองใหม่ใน browser ใช้ backend จำลอง ตรวจว่า request ID ยังเดิมหลัง reload และลิงก์ใช้ noopener/noreferrer
 - API timeout/abort ทดสอบใน unit test ด้วย simulated timer ไม่ใช่การรอเซิร์ฟเวอร์จริง 90 วินาที
@@ -110,7 +110,7 @@ worklet.js  4284ed5ca70100ed58a0613865c7e6e11371264ff46fc41eec95d53c6ad750db
 - ดาวน์โหลดเสียงกู้คืนได้เมื่อ Blob ที่ล้มเหลวยังอยู่ในแท็บ และส่วนที่ DB เขียนแล้วอ่านได้ ถ้าฐานข้อมูลอ่านไม่ได้หรือเครื่องเสียหายไม่รับประกันการกู้คืน
 - ประวัติ ID สร้าง Docs จำกัด 30 วัน/100 งานและพื้นที่ Script Properties ไม่ใช่ distributed transaction ระหว่าง Drive/Docs/Properties การหยุด process ระหว่างสร้างไฟล์อาจเหลือไฟล์ตกค้าง ให้ผู้ดูแลตรวจ JOB และ Drive แทนการสร้างซ้ำโดยเดา
 - JSON ไม่รวมเสียงและยังไม่มีการนำเข้าเสียง ไม่ใช่ backup แบบครบทุกไฟล์ ต้องสำรองเสียงแยก
-- ประวัติอยู่ตาม origin/เบราว์เซอร์ ไม่ซิงก์เครื่องใหม่ การขอ persistent storage อาจไม่ได้รับอนุญาตและไม่แทนการสำรอง
+- ประวัติในเครื่องอยู่ตาม origin/เบราว์เซอร์ รุ่น 3 เลือกซิงก์ผ่าน Drive ได้ตาม SYNC_TH.md การขอ persistent storage อาจไม่ได้รับอนุญาตและไม่แทนการสำรอง
 
 ลำดับต่อยอดที่แนะนำเมื่อจะใช้งานวงกว้าง:
 
@@ -120,4 +120,8 @@ worklet.js  4284ed5ca70100ed58a0613865c7e6e11371264ff46fc41eec95d53c6ad750db
 4. transcription/diarization service จริงที่มีคำยินยอม ขอบเขตความแม่นยำ และวิธีแก้ข้อมูล
 5. ทดสอบโหลด ระยะเวลายาว เครือข่ายหลุด อุปกรณ์มือถือ และการอัปเกรดฐานข้อมูล
 
-ติดตั้งและผ่าน checklist บัญชี/อุปกรณ์จริงใน `INSTALL_TH.md` ก่อนใช้ข้อมูลสำคัญ ไม่มีการ push, deploy, publish หรือส่งข้อความ/เสียงประชุมจริงออกจากเครื่องในการตรวจครั้งนี้
+ติดตั้งและผ่าน checklist บัญชี/อุปกรณ์จริงใน `INSTALL_TH.md` ก่อนใช้ข้อมูลสำคัญ โค้ดรุ่นก่อนส่งขึ้น GitHub แล้ว การทดสอบ Google ใช้ระบบจำลอง ไม่ได้ส่งข้อความ/เสียงประชุมจริงไป Google
+
+## การตรวจรุ่น 3
+
+เพิ่มการทดสอบสองอุปกรณ์ผ่าน Chromium กับ Google จำลอง ครอบคลุมข้อความ เสียง การแก้ชนกัน การลบคลาวด์ การส่งซ้ำเมื่อคำตอบสูญหาย และรายงาน Docs เดิม ดู SYNC_TH.md สำหรับขอบเขต การทดสอบนี้ไม่แทนบัญชี Google และโทรศัพท์จริง

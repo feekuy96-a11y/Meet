@@ -108,6 +108,38 @@ export const DB = {
     const ordered = [...chunks.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]);
     return new Blob(ordered, { type: ordered[0].type || 'audio/webm' });
   },
+  cloneMeetingWithAudio(sourceId, copy) {
+    return this.transaction(['meetings', 'audio'], 'readwrite', (tx) => {
+      tx.objectStore('meetings').put(structuredClone(copy));
+      const prefix = sourceId + ':',
+        store = tx.objectStore('audio');
+      const req = store.openCursor(IDBKeyRange.bound(prefix, prefix + '\uffff'));
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (!cursor) return;
+        store.put(cursor.value, copy.id + ':' + cursor.key.slice(prefix.length));
+        cursor.continue();
+      };
+    });
+  },
+  replaceFromCloud(meeting) {
+    return this.transaction(['meetings', 'audio'], 'readwrite', (tx) => {
+      tx.objectStore('audio').delete(IDBKeyRange.bound(meeting.id + ':', meeting.id + ':\uffff'));
+      tx.objectStore('meetings').put(structuredClone(meeting));
+    });
+  },
+  cacheRemotePart(id, source, version, part, blob) {
+    return this.transaction(['meetings', 'audio'], 'readwrite', (tx) => {
+      tx.objectStore('meetings').get(id).onsuccess = (event) => {
+        const m = event.target.result;
+        if (!m || m.cloud?.source !== source || m.cloud?.version !== version) {
+          tx.abort();
+          return;
+        }
+        tx.objectStore('audio').put(blob, `${id}:full${part}`);
+      };
+    });
+  },
   deleteAudioPrefix(prefix) {
     return this.transaction(['audio'], 'readwrite', (tx) =>
       tx.objectStore('audio').delete(IDBKeyRange.bound(prefix, prefix + '\uffff'))
