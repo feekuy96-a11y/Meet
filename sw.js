@@ -1,6 +1,6 @@
 // Bump this version whenever a static asset changes. Activation waits for old
 // tabs to close, avoiding an update halfway through a recording.
-const CACHE = 'meetnote-th-v3.0.0';
+const CACHE = 'meetnote-th-v3.1.0';
 const FILES = [
   './',
   'index.html',

@@ -44,3 +44,5 @@ Node.js 22 ขึ้นไป สำหรับ Linux ที่มี Chromium 
 `css/style.css` และ `js/worklet.js` คงไฟล์เดิมทุกไบต์ เพิ่มแก้ accessibility/print แยกใน `css/accessibility.css` และไม่เรียก worklet ที่อ้างการป้องกัน background throttling
 
 ก่อนแก้โครงสร้าง IndexedDB ให้ทำ migration และทดสอบข้อมูลเดิม ห้ามลบฐานข้อมูลแก้ปัญหาโดยไม่มีสำรอง ทุกครั้งที่เปลี่ยนไฟล์ static ให้เปลี่ยนเวอร์ชัน `CACHE` ใน sw.js และทดสอบออฟไลน์ใหม่ ใช้ `npm run format` จัดรูปแบบไฟล์ (ยกเว้นสองไฟล์ที่คงเดิม) และ `npm run format:check` ตรวจรูปแบบ
+
+มีปุ่ม **ตรวจการเชื่อมต่อ** แสดงผล Apps Script, Drive, Docs และ Gemini แยกกัน ดูคู่มือติดตั้งส่วนรุ่น 3.1 การตรวจไม่ส่งข้อมูลประชุม ตัวเลือกทดสอบคำตอบ AI ใช้โควตาและอาจมีค่าใช้จ่าย

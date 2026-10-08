@@ -127,6 +127,8 @@ function updateControls() {
   $('#bDocs').disabled = state !== 'idle' || busy || !!recovery;
   $('#bNew').disabled = state !== 'idle' || busy || !!recovery;
   $('#bSync').disabled = state !== 'idle' || busy || !!recovery;
+  $('#bCheck').disabled = state !== 'idle' || busy || !!recovery;
+  $('#bSet').disabled = busy;
   $('#bConflicts').disabled = state !== 'idle' || busy || !!recovery;
   $('#bPause').textContent = state === 'pause' ? '▶ ทำต่อ' : '⏸ พัก';
   $('#chip').className = 'chip ' + (state === 'rec' ? 'rec' : state === 'pause' ? 'pa' : '');
@@ -1012,6 +1014,7 @@ $('#bSet').onclick = () =>
           };
           localStorage.setItem('mn_cfg', JSON.stringify(next));
           cfg = next;
+          $('#connectionStatus').textContent = 'การตั้งค่าเปลี่ยนแล้ว โปรดตรวจบริการใหม่';
           gasToken = $('#cGasTok').value;
           UI.toast('บันทึกการตั้งค่าแล้ว', 'ok');
           setTimeout(() => scheduleCloud(), 0);
@@ -1332,3 +1335,92 @@ updateControls();
     );
   }
 })();
+
+$('#bCheck').onclick = run(async () => {
+  if (!available()) return;
+  if (!navigator.onLine) throw new Error('ต้องเชื่อมต่ออินเทอร์เน็ตเพื่อตรวจบริการ');
+  validateEndpoint(cfg.gasUrl);
+  if (!gasToken) throw new Error('ใส่รหัสผ่านเชื่อมต่อในตั้งค่าก่อน');
+  let testAI = false;
+  const confirmed = await UI.modal(
+    'ตรวจการเชื่อมต่อ',
+    '<p>ตรวจ Apps Script, Drive, Docs และการเข้าถึงโมเดล Gemini โดยไม่ส่งข้อมูลประชุม จะสร้างไฟล์และเอกสารทดสอบแล้วนำไปถังขยะ หากล้างไม่สำเร็จอาจเหลือไฟล์ทดสอบ</p><label class="sw"><input id="checkAI" type="checkbox"><span></span>ทดสอบสร้างคำตอบ AI สั้น ๆ เพิ่มเติม (ใช้โควตาและอาจมีค่าใช้จ่าย)</label><p>การผ่านการตรวจนี้ไม่รับประกันการซิงก์เสียงยาวหรือทุกอุปกรณ์</p>',
+    [
+      { t: 'ยกเลิก', v: false },
+      {
+        t: 'เริ่มตรวจ',
+        c: 'go',
+        v: true,
+        fn: () => {
+          testAI = $('#checkAI').checked;
+        }
+      }
+    ]
+  );
+  if (!confirmed || !available()) return;
+  busy = true;
+  updateControls();
+  $('#connectionStatus').textContent = 'กำลังตรวจบริการ…';
+  try {
+    const result = await API.callGAS({ ...cfg, gasToken }, { action: 'diagnostics', testAI });
+    const names = {
+      server: 'Apps Script และรหัสเชื่อมต่อ',
+      drive: 'Google Drive',
+      docs: 'Google Docs',
+      gemini: 'Gemini: key และโมเดล',
+      generation: 'Gemini: สร้างคำตอบ'
+    };
+    if (
+      !Array.isArray(result.checks) ||
+      result.checks.length !== 5 ||
+      Object.keys(names).some((id) => result.checks.filter((c) => c?.id === id).length !== 1) ||
+      result.checks.some(
+        (c) =>
+          !['pass', 'fail', 'skip'].includes(c.status) ||
+          typeof c.message !== 'string' ||
+          c.message.length > 500
+      )
+    )
+      throw new Error('ผลตรวจไม่ถูกต้อง โปรดอัปเดต Code.gs และ Deploy รุ่นใหม่');
+    const failed = result.checks.filter((c) => c.status === 'fail').length;
+    const skipped = result.checks.filter((c) => c.status === 'skip').length;
+    $('#connectionStatus').textContent = failed
+      ? `ตรวจพบปัญหา ${failed} บริการ`
+      : skipped
+        ? 'ตรวจพื้นฐานผ่าน · ยังไม่ทดสอบคำตอบ AI'
+        : 'ตรวจบริการผ่าน';
+    await UI.modal(
+      'ผลตรวจการเชื่อมต่อ',
+      '<p>ผล ณ ' +
+        esc(new Date().toLocaleString('th-TH')) +
+        ' · ตรวจใหม่ได้เมื่อเปลี่ยนการตั้งค่า</p>' +
+        result.checks
+          .map(
+            (c) =>
+              '<p><b>' +
+              { pass: '✅ ผ่าน', fail: '❌ ไม่ผ่าน', skip: '➖ ยังไม่ทดสอบ' }[c.status] +
+              ' — ' +
+              esc(names[c.id]) +
+              '</b><br>' +
+              esc(c.message) +
+              '</p>'
+          )
+          .join('') +
+        '<p>การตรวจนี้ไม่ใช้ข้อมูลประชุม และไม่แทนการทดลองซิงก์คอมกับมือถือจริง</p>',
+      [{ t: 'ปิด', v: 0 }]
+    );
+  } catch (error) {
+    $('#connectionStatus').textContent = 'ตรวจไม่สำเร็จ';
+    await UI.modal(
+      'ตรวจการเชื่อมต่อไม่สำเร็จ',
+      '<p>' +
+        esc(error.message) +
+        '</p><p>ตรวจ Web App URL รหัสเชื่อมต่อ และสิทธิ์ Deploy หากเพิ่งเพิ่มปุ่มตรวจ ต้องวาง Code.gs รุ่นล่าสุดและ Deploy เป็น New version</p>',
+      [{ t: 'ปิด', v: 0 }]
+    );
+  } finally {
+    busy = false;
+    updateControls();
+    scheduleCloud();
+  }
+});

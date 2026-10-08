@@ -70,7 +70,7 @@ worklet.js  4284ed5ca70100ed58a0613865c7e6e11371264ff46fc41eec95d53c6ad750db
 ### รันในเครื่องทดสอบจริง
 
 - `npm ci --ignore-scripts --no-audit --no-fund --cache /workspace/.npm-cache`: ติดตั้งจาก lockfile ได้
-- `npm test`: **26 ผ่าน, 0 ล้มเหลว, 0 ข้าม** (10 core, 7 backend และ 9 cloud)
+- `npm test`: **29 ผ่าน, 0 ล้มเหลว, 0 ข้าม** (10 core, 7 backend, 9 cloud และ 3 diagnostics)
 - Browser smoke test บน Chromium จริงผ่าน: ข้อความอยู่หลัง reload, แก้ข้อความ, theme, URL validation, token ไม่เก็บถาวร, AI UI, ข้อความ HTML จาก error ไม่กลายเป็น tag, MediaRecorder กับไมโครโฟนจำลอง, พัก/ทำต่อ, final audio เปิด metadata ได้และดาวน์โหลด, Markdown/Word/PDF print view/JSON, import, crash recovery, quota-failure recovery, offline shell, ป้องกันแท็บที่สอง และข้อมูลเก่าเสียรูปแบบยังสำรองได้
 - เส้นทางสร้าง Docs ที่เซิร์ฟเวอร์ตอบ error แล้วลองใหม่ใน browser ใช้ backend จำลอง ตรวจว่า request ID ยังเดิมหลัง reload และลิงก์ใช้ noopener/noreferrer
 - API timeout/abort ทดสอบใน unit test ด้วย simulated timer ไม่ใช่การรอเซิร์ฟเวอร์จริง 90 วินาที
@@ -125,3 +125,7 @@ worklet.js  4284ed5ca70100ed58a0613865c7e6e11371264ff46fc41eec95d53c6ad750db
 ## การตรวจรุ่น 3
 
 เพิ่มการทดสอบสองอุปกรณ์ผ่าน Chromium กับ Google จำลอง ครอบคลุมข้อความ เสียง การแก้ชนกัน การลบคลาวด์ การส่งซ้ำเมื่อคำตอบสูญหาย และรายงาน Docs เดิม ดู SYNC_TH.md สำหรับขอบเขต การทดสอบนี้ไม่แทนบัญชี Google และโทรศัพท์จริง
+
+## ตรวจการเชื่อมต่อรุ่น 3.1
+
+เพิ่ม probes ที่ต้องผ่านรหัสก่อน เขียน/อ่าน/นำไฟล์และ Docs ทดสอบไปถังขยะ ตรวจ Gemini ด้วยคำขอ metadata และเลือกสร้างคำตอบจากข้อความจำลองได้ การล้มเหลวแต่ละบริการไม่ปิดบังผลบริการอื่น ไม่คืนค่า key หรือ provider response ตรวจผ่านไม่ได้รับประกันเสียง ประชุมยาว หรือทุกอุปกรณ์

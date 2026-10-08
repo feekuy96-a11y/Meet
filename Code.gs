@@ -21,7 +21,7 @@ function output_(data) {
   );
 }
 function doGet() {
-  return output_({ ok: true, service: 'MeetNote TH', version: 3 });
+  return output_({ ok: true, service: 'MeetNote TH', version: '3.1.0' });
 }
 function doPost(event) {
   let lock;
@@ -40,7 +40,8 @@ function doPost(event) {
       });
     if (!secureEqual_(p.token, token))
       return output_({ ok: false, error: 'รหัสผ่านเชื่อมต่อไม่ถูกต้อง' });
-    if (!['summarize', 'createDoc', ...CLOUD_ACTIONS].includes(p.action)) throw new Error('ACTION');
+    if (!['summarize', 'createDoc', 'diagnostics', ...CLOUD_ACTIONS].includes(p.action))
+      throw new Error('ACTION');
     const request = validateRequest_(p);
     lock = LockService.getScriptLock();
     if (!lock.tryLock(1000))
@@ -48,6 +49,7 @@ function doPost(event) {
     // Global budget limit for authenticated users; this is not per-user auth.
     rateLimit_(props, CLOUD_ACTIONS.includes(p.action));
     if (CLOUD_ACTIONS.includes(p.action)) return output_(cloudAction_(request, props));
+    if (p.action === 'diagnostics') return output_(diagnostics_(request, props));
     if (p.action === 'summarize') return output_(summarize_(request, props));
     return output_(createDocs_(request, props));
   } catch (error) {
@@ -126,6 +128,10 @@ function validateAudio_(audio) {
   });
 }
 function validateRequest_(p) {
+  if (p.action === 'diagnostics') {
+    if (p.testAI !== undefined && typeof p.testAI !== 'boolean') throw new Error('INPUT');
+    return { action: 'diagnostics', testAI: p.testAI === true };
+  }
   if (CLOUD_ACTIONS.includes(p.action)) return validateCloudRequest_(p);
   const request = {
     action: p.action,
@@ -835,4 +841,167 @@ function finishCloudDoc_(folder, head, props) {
       publishHead_(folder, head);
     } catch {}
   }
+}
+
+// Authenticated probes use synthetic data only. Test artifacts are trashed;
+// failures are independent and provider bodies / secret values never leave here.
+function diagnostics_(p, props) {
+  const checks = [
+    { id: 'server', status: 'pass', message: 'เชื่อมต่อ Apps Script และตรวจรหัสผ่านสำเร็จ' }
+  ];
+  let file, doc;
+  try {
+    const folder = cloudRoot_(props);
+    file = folder.createFile(
+      'MeetNote connection check.txt',
+      'MeetNote connection check',
+      'text/plain'
+    );
+    if (file.getBlob().getDataAsString() !== 'MeetNote connection check') throw new Error('read');
+    file.setTrashed(true);
+    file = null;
+    checks.push({
+      id: 'drive',
+      status: 'pass',
+      message: 'เขียน อ่าน และย้ายไฟล์ทดสอบไปถังขยะในโฟลเดอร์ข้อมูลได้'
+    });
+  } catch (_) {
+    checks.push({
+      id: 'drive',
+      status: 'fail',
+      message: 'ตรวจ Drive ไม่สำเร็จ โปรดตรวจสิทธิ์ โฟลเดอร์ และโควตา'
+    });
+  } finally {
+    if (file) {
+      try {
+        file.setTrashed(true);
+      } catch (_) {}
+    }
+  }
+  try {
+    doc = DocumentApp.create('MeetNote connection check');
+    doc.getBody().appendParagraph('MeetNote connection check');
+    doc.saveAndClose();
+    const opened = DocumentApp.openById(doc.getId());
+    if (opened.getBody().getText().indexOf('MeetNote connection check') < 0)
+      throw new Error('read');
+    opened.saveAndClose();
+    const docFile = DriveApp.getFileById(doc.getId());
+    docFile.moveTo(folder_(props));
+    docFile.setTrashed(true);
+    doc = null;
+    checks.push({
+      id: 'docs',
+      status: 'pass',
+      message: 'สร้าง อ่าน และย้ายเอกสารทดสอบไปถังขยะได้'
+    });
+  } catch (_) {
+    checks.push({
+      id: 'docs',
+      status: 'fail',
+      message: 'ตรวจ Docs ไม่สำเร็จ โปรดตรวจสิทธิ์ โฟลเดอร์ และโควตา'
+    });
+  } finally {
+    if (doc) {
+      try {
+        DriveApp.getFileById(doc.getId()).setTrashed(true);
+      } catch (_) {}
+    }
+  }
+  const key = props.getProperty('GEMINI_API_KEY');
+  const model = props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
+  let accessible = false;
+  if (!key) {
+    checks.push({
+      id: 'gemini',
+      status: 'fail',
+      message: 'ยังไม่ได้ตั้ง GEMINI_API_KEY ใน Script Properties'
+    });
+  } else if (!/^gemini-[A-Za-z0-9.-]+$/.test(model)) {
+    checks.push({
+      id: 'gemini',
+      status: 'fail',
+      message: 'โปรดตรวจ GEMINI_MODEL ใน Script Properties'
+    });
+  } else {
+    try {
+      const response = UrlFetchApp.fetch(
+        'https://generativelanguage.googleapis.com/v1beta/models/' + model,
+        {
+          method: 'get',
+          headers: { 'x-goog-api-key': key },
+          muteHttpExceptions: true
+        }
+      );
+      if (response.getResponseCode() !== 200) throw new Error('api');
+      const data = JSON.parse(response.getContentText());
+      if (
+        !Array.isArray(data.supportedGenerationMethods) ||
+        !data.supportedGenerationMethods.includes('generateContent')
+      )
+        throw new Error('model');
+      accessible = true;
+      checks.push({
+        id: 'gemini',
+        status: 'pass',
+        message: 'กุญแจเข้าถึงโมเดลได้ ยังไม่ใช่การทดสอบสร้างคำตอบ'
+      });
+    } catch (_) {
+      checks.push({
+        id: 'gemini',
+        status: 'fail',
+        message: 'เข้าถึงโมเดลไม่ได้ โปรดตรวจ key โมเดล และข้อจำกัด API ใน Google AI Studio'
+      });
+    }
+  }
+  if (!p.testAI || !accessible) {
+    checks.push({
+      id: 'generation',
+      status: 'skip',
+      message: !p.testAI ? 'ยังไม่ได้เลือกทดสอบคำตอบ AI' : 'ต้องแก้การเข้าถึงโมเดลก่อน'
+    });
+  } else {
+    try {
+      const response = UrlFetchApp.fetch(
+        'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent',
+        {
+          method: 'post',
+          contentType: 'application/json',
+          headers: { 'x-goog-api-key': key },
+          muteHttpExceptions: true,
+          payload: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: 'Connection test. Reply OK.' }] }],
+            generationConfig: {
+              maxOutputTokens: 256,
+              ...(/^gemini-2\.5-flash/.test(model) ? { thinkingConfig: { thinkingBudget: 0 } } : {})
+            }
+          })
+        }
+      );
+      if (response.getResponseCode() !== 200) throw new Error('api');
+      const data = JSON.parse(response.getContentText());
+      const candidate = data.candidates && data.candidates[0];
+      if (
+        !candidate ||
+        candidate.finishReason !== 'STOP' ||
+        !candidate.content ||
+        !candidate.content.parts.some(
+          (part) => !part.thought && typeof part.text === 'string' && part.text.trim()
+        )
+      )
+        throw new Error('answer');
+      checks.push({
+        id: 'generation',
+        status: 'pass',
+        message: 'สร้างคำตอบจากข้อความทดสอบได้ ไม่ได้ทดสอบเสียงหรือสรุปประชุมจริง'
+      });
+    } catch (_) {
+      checks.push({
+        id: 'generation',
+        status: 'fail',
+        message: 'สร้างคำตอบไม่ได้ โปรดตรวจโควตา การเรียกเก็บเงิน และการรองรับโมเดล'
+      });
+    }
+  }
+  return { ok: true, version: '3.1.0', checkedAt: new Date().toISOString(), checks };
 }

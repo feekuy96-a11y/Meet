@@ -111,11 +111,18 @@ export function backend() {
         return {
           getResponseCode: () => 200,
           getContentText: () =>
-            JSON.stringify({
-              candidates: [
-                { finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(summary) }] } }
-              ]
-            })
+            JSON.stringify(
+              options.method === 'get'
+                ? { supportedGenerationMethods: ['generateContent'] }
+                : {
+                    candidates: [
+                      {
+                        finishReason: 'STOP',
+                        content: { parts: [{ text: JSON.stringify(summary) }] }
+                      }
+                    ]
+                  }
+            )
         };
       }
     },
@@ -151,6 +158,7 @@ export function backend() {
         const id = 'doc' + ++counter,
           lines = [],
           body = {
+            getText: () => lines.join('\n'),
             clear: () => {
               lines.length = 0;
             },
