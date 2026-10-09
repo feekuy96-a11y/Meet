@@ -1,6 +1,0 @@
-node_modules/
-.cache/
-test-results/
-*.log
-.env
-.env.*
